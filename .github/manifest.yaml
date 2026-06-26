@@ -19,3 +19,14 @@ ci:
     rollback:
       repository_dispatch:
         types: [rollback-requested]
+  state:
+    prod:
+      sha: 47f3c9573bedff51a291f2cf14696d1ffed6235a
+      version: v0.1.0-rc.0
+      committed_at: "2026-06-26T18:21:41Z"
+      committed_by: joshua-temple
+      deploys:
+        app:
+          sha: 47f3c9573bedff51a291f2cf14696d1ffed6235a
+          deployed_at: "2026-06-26T18:21:41Z"
+          deployed_by: joshua-temple
