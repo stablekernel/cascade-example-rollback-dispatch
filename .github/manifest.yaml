@@ -1,0 +1,21 @@
+ci:
+  config:
+    schema_version: 1
+    trunk_branch: main
+    cli_version: v0.5.0-rc.10
+    state_token: ${{ secrets.CASCADE_STATE_TOKEN }}
+    manifest_file: .github/manifest.yaml
+    manifest_key: ci
+    environments: [prod]
+    triggers: [src/**]
+    builds:
+      - name: app
+        workflow: .github/workflows/build-app.yaml
+        triggers: []
+    deploys:
+      - name: app
+        workflow: .github/workflows/deploy-app.yaml
+        triggers: []
+    rollback:
+      repository_dispatch:
+        types: [rollback-requested]

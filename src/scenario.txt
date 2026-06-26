@@ -1,0 +1,5 @@
+Source-of-record file for the rollback-dispatch example.
+
+Each scenario-suite run appends a line here on a branch, opens a PR, and merges
+it so orchestrate has a real source change to build and deploy. The repository
+exists to prove the repository_dispatch rollback entry point end to end.

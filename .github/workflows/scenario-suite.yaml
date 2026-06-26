@@ -1,0 +1,376 @@
+name: scenario-suite
+
+# Proves the repository_dispatch rollback entry point end to end.
+#
+# The generated Rollback workflow (cascade-rollback.yaml) opts into a
+# repository_dispatch trigger (event type rollback-requested). An external
+# system fires that event with the rollback parameters in client_payload; the
+# workflow coalesces github.event.inputs.X with github.event.client_payload.X so
+# the same jobs resolve whether the rollback came from the manual
+# (workflow_dispatch) or the external (repository_dispatch) path.
+#
+# This suite seeds two successive prod deploys, then fires a REAL
+# repository_dispatch rollback via the dispatches API and asserts prod actually
+# reverted to its prior SHA and version and was marked diverged. It is the only
+# live proof of the client_payload coalesce path.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 7 * * 1'
+
+permissions:
+  contents: write
+  actions: write
+  pull-requests: write
+
+concurrency:
+  group: scenario-suite
+  cancel-in-progress: false
+
+env:
+  MANIFEST: .github/manifest.yaml
+  MANIFEST_KEY: ci
+  SHA_RE: '^[0-9a-f]{40}$'
+  ROLLBACK_WORKFLOW: cascade-rollback.yaml
+
+jobs:
+  open-window:
+    name: Open reconcile window
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      window-start: ${{ steps.window.outputs.window-start }}
+    steps:
+      # The reconcile window opens before the first merge or dispatch, so every
+      # run the suite goes on to cause lands at or after this timestamp and the
+      # reconcile job sees all of them.
+      - name: Open reconcile window
+        id: window
+        run: |
+          set -euo pipefail
+          WINDOW_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "window-start=$WINDOW_START" >> "$GITHUB_OUTPUT"
+          echo "reconcile window opened at $WINDOW_START"
+
+  lifecycle:
+    name: Seed, advance, then repository_dispatch rollback
+    needs: [open-window]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ secrets.CASCADE_STATE_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.CASCADE_STATE_TOKEN }}
+    outputs:
+      orchestrate1_run_id: ${{ steps.seed.outputs.orchestrate1_run_id }}
+      orchestrate2_run_id: ${{ steps.advance.outputs.orchestrate2_run_id }}
+      rollback_run_id: ${{ steps.rollback.outputs.rollback_run_id }}
+    steps:
+      - name: Install gh transient-retry wrapper and helpers
+        run: |
+          cat > "$RUNNER_TEMP/helpers.sh" <<'HELPERS'
+          _gh_is_transient() {
+            local out="$1"
+            if printf '%s' "$out" | grep -qiE 'HTTP 5[0-9][0-9]|HTTP 429|HTTP 401|Bad credentials|was submitted too quickly|secondary rate limit'; then
+              return 0
+            fi
+            if printf '%s' "$out" | grep -qiE 'HTTP 403'; then
+              if printf '%s' "$out" | grep -qiE 'rate limit|secondary|abuse|too quickly'; then
+                return 0
+              fi
+            fi
+            return 1
+          }
+          gh() {
+            local attempt=1 max="${GH_RETRY_MAX:-5}" delay="${GH_RETRY_BASE_DELAY:-3}" out rc
+            while :; do
+              out="$(command gh "$@" 2>&1)" && rc=0 || rc=$?
+              if [ "$rc" -eq 0 ]; then
+                printf '%s\n' "$out"
+                return 0
+              fi
+              if [ "$attempt" -ge "$max" ] || ! _gh_is_transient "$out"; then
+                printf '%s\n' "$out" >&2
+                return "$rc"
+              fi
+              printf 'gh: transient error on attempt %d/%d, retrying in %ds\n%s\n' "$attempt" "$max" "$delay" "$out" >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          # Read state sub-keys for an env through the CLI.
+          state_sha() {
+            cascade status env "$1" --json | jq -r '.state.sha // empty'
+          }
+          state_version() {
+            cascade status env "$1" --json | jq -r '.state.version // empty'
+          }
+          # Read the divergence ref an env carries (rollback/<env> after a
+          # rollback, empty on the linear promotion line).
+          state_ref() {
+            cascade status env "$1" --json | jq -r '.state.ref // empty'
+          }
+          assert_match() {
+            local label="$1" value="$2" pattern="$3"
+            if [[ "${value}" =~ ${pattern} ]]; then
+              echo "  ok: ${label} (${value}) matches ${pattern}"
+            else
+              echo "::error::${label} value '${value}' does not match ${pattern}"
+              return 1
+            fi
+          }
+          assert_equal() {
+            local label="$1" got="$2" want="$3"
+            if [[ "${got}" == "${want}" ]]; then
+              echo "  ok: ${label} == ${want}"
+            else
+              echo "::error::${label} expected '${want}' got '${got}'"
+              return 1
+            fi
+          }
+          # Bounded wait for the orchestrate run a merge commit fired, keyed on
+          # headSha so a stale or concurrent run is never mistaken for this one.
+          # Writes the resolved run id to RESOLVED_RUN_ID_FILE and prints the
+          # conclusion.
+          wait_for_orchestrate_sha() {
+            local merge_sha="$1" attempts=15 i=0 run_id="" status conclusion
+            while [ "${i}" -lt "${attempts}" ]; do
+              run_id="$(gh run list --workflow orchestrate.yaml --branch main \
+                --json databaseId,headSha,status \
+                --jq ".[] | select(.headSha==\"${merge_sha}\") | .databaseId" | head -n1)"
+              if [ -n "${run_id}" ] && [ -n "${RESOLVED_RUN_ID_FILE:-}" ]; then
+                echo "${run_id}" > "${RESOLVED_RUN_ID_FILE}"
+              fi
+              if [ -n "${run_id}" ]; then
+                status="$(gh run view "${run_id}" --json status --jq '.status // "none"')"
+                if [ "${status}" = "completed" ]; then
+                  conclusion="$(gh run view "${run_id}" --json conclusion --jq '.conclusion // "none"')"
+                  echo "${conclusion}"
+                  return 0
+                fi
+              fi
+              i=$((i + 1))
+              sleep 60
+            done
+            echo "::error::timed out waiting for orchestrate run for ${merge_sha}"
+            return 1
+          }
+          # Bounded wait for the rollback run fired by repository_dispatch. The
+          # event filter pins it to the external path under test, not a manual
+          # workflow_dispatch. Writes the run id to RESOLVED_RUN_ID_FILE and
+          # prints the conclusion.
+          wait_for_dispatch_rollback() {
+            local since="$1" attempts=15 i=0 run_id="" status conclusion
+            while [ "${i}" -lt "${attempts}" ]; do
+              if [ -z "${run_id}" ]; then
+                run_id="$(gh run list --workflow "${ROLLBACK_WORKFLOW}" \
+                  --event repository_dispatch --created ">=${since}" \
+                  --json databaseId --jq '.[0].databaseId // empty')"
+                if [ -n "${run_id}" ] && [ -n "${RESOLVED_RUN_ID_FILE:-}" ]; then
+                  echo "${run_id}" > "${RESOLVED_RUN_ID_FILE}"
+                fi
+              fi
+              if [ -n "${run_id}" ]; then
+                status="$(gh run view "${run_id}" --json status --jq '.status // "none"')"
+                if [ "${status}" = "completed" ]; then
+                  conclusion="$(gh run view "${run_id}" --json conclusion --jq '.conclusion // "none"')"
+                  echo "${conclusion}"
+                  return 0
+                fi
+              fi
+              i=$((i + 1))
+              sleep 60
+            done
+            echo "::error::timed out waiting for repository_dispatch rollback run since ${since}"
+            return 1
+          }
+          # Poll trunk until an env's recorded SHA moves off a prior value.
+          sync_env_state_until_sha_changed() {
+            local env="$1" prior_sha="$2" attempts=10 i=0
+            while [ "${i}" -lt "${attempts}" ]; do
+              git fetch origin main --quiet
+              git reset --hard origin/main >/dev/null
+              if [ -n "$(state_sha "${env}")" ] && [ "$(state_sha "${env}")" != "${prior_sha}" ]; then
+                return 0
+              fi
+              i=$((i + 1))
+              sleep 60
+            done
+            echo "::error::timed out waiting for ${env} sha to change from ${prior_sha} on trunk"
+            return 1
+          }
+          # Open and merge a source change on a fresh branch, printing the merge
+          # commit SHA on the last line.
+          merge_source_change() {
+            local branch="scenario/src-$(date +%s)-$1"
+            git checkout main >/dev/null 2>&1
+            git fetch origin main --quiet
+            git reset --hard origin/main >/dev/null
+            git checkout -b "${branch}" >/dev/null
+            echo "touched at $(date -u +%FT%TZ) ($1)" >> src/scenario.txt
+            git add src/scenario.txt
+            git commit --no-gpg-sign -m "feat: scenario source change $1" >/dev/null
+            git push origin "${branch}" >/dev/null 2>&1
+            gh pr create --base main --head "${branch}" \
+              --title "feat: scenario source change $1" \
+              --body "Automated scenario run. Drives orchestrate on merge." >/dev/null
+            gh pr merge "${branch}" --rebase --delete-branch >/dev/null
+            git fetch origin main --quiet
+            git rev-parse origin/main
+          }
+          HELPERS
+          echo "BASH_ENV=$RUNNER_TEMP/helpers.sh" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.CASCADE_STATE_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup CLI
+        uses: stablekernel/cascade/.github/actions/setup-cli@v0.5.0-rc.10
+        with:
+          token: ${{ secrets.CASCADE_STATE_TOKEN }}
+          version: v0.5.0-rc.10
+
+      - name: Configure git identity
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Clean slate - delete leftover releases and tags
+        run: |
+          set -euo pipefail
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName --jq '.[].tagName' \
+            | while read -r t; do gh release delete "$t" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true; done
+          git fetch --tags --quiet || true
+          for t in $(git tag -l 'v*' 'rel-*'); do git push origin --delete "$t" 2>/dev/null || true; done
+
+      - name: Seed - first prod deploy
+        id: seed
+        run: |
+          set -euo pipefail
+          export RESOLVED_RUN_ID_FILE="${RUNNER_TEMP}/seed-run-id"
+          MERGE1="$(merge_source_change a | tail -n1)"
+          conclusion="$(wait_for_orchestrate_sha "${MERGE1}")"
+          assert_equal "seed orchestrate conclusion" "${conclusion}" "success"
+          echo "orchestrate1_run_id=$(cat "${RESOLVED_RUN_ID_FILE}")" >> "$GITHUB_OUTPUT"
+          sync_env_state_until_sha_changed prod "none"
+          SHA1="$(state_sha prod)"
+          VER1="$(state_version prod)"
+          assert_match "seed prod sha" "${SHA1}" "${SHA_RE}"
+          assert_equal "seed prod sha == merge1" "${SHA1}" "${MERGE1}"
+          echo "prior_sha=${SHA1}" >> "$GITHUB_OUTPUT"
+          echo "prior_version=${VER1}" >> "$GITHUB_OUTPUT"
+          echo "seeded prod at ${VER1} (${SHA1})"
+
+      - name: Advance - second prod deploy
+        id: advance
+        env:
+          PRIOR_SHA: ${{ steps.seed.outputs.prior_sha }}
+        run: |
+          set -euo pipefail
+          export RESOLVED_RUN_ID_FILE="${RUNNER_TEMP}/advance-run-id"
+          MERGE2="$(merge_source_change b | tail -n1)"
+          conclusion="$(wait_for_orchestrate_sha "${MERGE2}")"
+          assert_equal "advance orchestrate conclusion" "${conclusion}" "success"
+          echo "orchestrate2_run_id=$(cat "${RESOLVED_RUN_ID_FILE}")" >> "$GITHUB_OUTPUT"
+          # Prod now carries the second deploy, with the first retained in the
+          # deploy-history ring as the rollback target.
+          sync_env_state_until_sha_changed prod "${PRIOR_SHA}"
+          SHA2="$(state_sha prod)"
+          VER2="$(state_version prod)"
+          assert_equal "advance prod sha == merge2" "${SHA2}" "${MERGE2}"
+          echo "current_sha=${SHA2}" >> "$GITHUB_OUTPUT"
+          echo "current_version=${VER2}" >> "$GITHUB_OUTPUT"
+          echo "advanced prod to ${VER2} (${SHA2})"
+
+      - name: Rollback - fire repository_dispatch and assert the real revert
+        id: rollback
+        env:
+          PRIOR_SHA: ${{ steps.seed.outputs.prior_sha }}
+          PRIOR_VERSION: ${{ steps.seed.outputs.prior_version }}
+          CURRENT_SHA: ${{ steps.advance.outputs.current_sha }}
+          CURRENT_VERSION: ${{ steps.advance.outputs.current_version }}
+        run: |
+          set -euo pipefail
+          export RESOLVED_RUN_ID_FILE="${RUNNER_TEMP}/rollback-run-id"
+          ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # Fire the REAL external entry point: the dispatches API with the
+          # rollback parameters in client_payload. The keys (environment,
+          # dry_run) match exactly what the generated rollback workflow reads
+          # via github.event.client_payload.<key>. No target is sent, so
+          # preflight resolves the previous version from the deploy-history ring.
+          gh api "repos/${GITHUB_REPOSITORY}/dispatches" -X POST \
+            -f event_type=rollback-requested \
+            -f 'client_payload[environment]=prod' \
+            -F 'client_payload[dry_run]=false'
+          conclusion="$(wait_for_dispatch_rollback "${ts}")"
+          echo "rollback_run_id=$(cat "${RESOLVED_RUN_ID_FILE}")" >> "$GITHUB_OUTPUT"
+          assert_equal "repository_dispatch rollback conclusion" "${conclusion}" "success"
+          # The real effect: finalize commits the rolled-back state to trunk, so
+          # poll until prod's SHA moves off the current (pre-rollback) value.
+          sync_env_state_until_sha_changed prod "${CURRENT_SHA}"
+          NEW_SHA="$(state_sha prod)"
+          NEW_VER="$(state_version prod)"
+          NEW_REF="$(state_ref prod)"
+          assert_match "rolled-back prod sha" "${NEW_SHA}" "${SHA_RE}"
+          # Reverted to the exact prior deploy, not the pre-rollback current one.
+          assert_equal "prod reverted to prior sha" "${NEW_SHA}" "${PRIOR_SHA}"
+          assert_equal "prod reverted to prior version" "${NEW_VER}" "${PRIOR_VERSION}"
+          if [ "${NEW_SHA}" = "${CURRENT_SHA}" ]; then
+            echo "::error::prod sha did not revert (still ${CURRENT_SHA})"
+            exit 1
+          fi
+          # The rollback marks the env diverged until a forward promotion rejoins.
+          assert_equal "prod marked diverged by rollback" "${NEW_REF}" "rollback/prod"
+          {
+            echo "## repository_dispatch rollback"
+            echo "- fired via dispatches API (event_type=rollback-requested)"
+            echo "- client_payload keys: environment, dry_run"
+            echo "- prod ${CURRENT_VERSION} -> ${NEW_VER} (reverted to prior)"
+            echo "- prod sha reverted to prior deploy: yes"
+            echo "- prod marked diverged (ref=rollback/prod): yes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Register seed orchestrate run
+        uses: stablekernel/cascade/.github/actions/register-run@main
+        with:
+          run-id: ${{ steps.seed.outputs.orchestrate1_run_id }}
+          expected-conclusion: success
+          reason: seed-orchestrate-on-merge
+          upload: 'true'
+
+      - name: Register advance orchestrate run
+        uses: stablekernel/cascade/.github/actions/register-run@main
+        with:
+          run-id: ${{ steps.advance.outputs.orchestrate2_run_id }}
+          expected-conclusion: success
+          reason: advance-orchestrate-on-merge
+          upload: 'true'
+
+      - name: Register repository_dispatch rollback run
+        uses: stablekernel/cascade/.github/actions/register-run@main
+        with:
+          run-id: ${{ steps.rollback.outputs.rollback_run_id }}
+          expected-conclusion: success
+          reason: repository-dispatch-rollback
+          upload: 'true'
+
+  # Reconcile gate: structural coverage backstop. The lifecycle asserts above
+  # still gate every run they wait on; this job is additive. It enumerates every
+  # run this repo produced since window-start and fails closed if any is
+  # unaccounted for in the merged ledger - an unregistered non-success run, or a
+  # registered run that concluded other than its expected conclusion.
+  reconcile:
+    name: Reconcile scenario-window runs
+    needs: [open-window, lifecycle]
+    if: always()
+    uses: stablekernel/cascade/.github/workflows/fleet-reconcile.yaml@main
+    permissions:
+      contents: read
+      actions: read
+    with:
+      window-start: ${{ needs.open-window.outputs.window-start }}
+      cascade-ref: main
