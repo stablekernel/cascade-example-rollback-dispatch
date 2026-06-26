@@ -1,43 +1,47 @@
 ci:
-  config:
-    schema_version: 1
-    trunk_branch: main
-    triggers:
-      - src/**
-    environments:
-      - prod
-    cli_version: v0.6.0-dryrun.2
-    state_token: ${{ secrets.CASCADE_STATE_TOKEN }}
-    manifest_file: .github/manifest.yaml
-    manifest_key: ci
-    builds:
-      - name: app
-        workflow: .github/workflows/build-app.yaml
-        triggers: []
-    deploys:
-      - name: app
-        workflow: .github/workflows/deploy-app.yaml
-        triggers: []
-    rollback:
-      repository_dispatch:
-        types:
-          - rollback-requested
-  state:
-    prod:
-      sha: 0a70288844cd66e82ad4f28513708aa910d90932
-      version: v0.1.0-rc.1
-      committed_at: "2026-06-26T22:48:50Z"
-      committed_by: joshua-temple
-      deploys:
-        app:
-          sha: 0a70288844cd66e82ad4f28513708aa910d90932
-          version: v0.6.0-dryrun.2
-          deployed_at: "2026-06-26T22:48:50Z"
-          deployed_by: joshua-temple
-      ref: rollback/prod
-      base_sha: bfd7808fb14443dd0f5848d3714a92b22b0746d1
-      previous:
-        - sha: bfd7808fb14443dd0f5848d3714a92b22b0746d1
-          version: v0.6.0-dryrun.2
-          committed_at: "2026-06-26T18:23:34Z"
-          committed_by: joshua-temple
+    config:
+        schema_version: 1
+        trunk_branch: main
+        triggers:
+            - src/**
+        environments:
+            - prod
+        cli_version: v0.6.0-dryrun.2
+        state_token: ${{ secrets.CASCADE_STATE_TOKEN }}
+        manifest_file: .github/manifest.yaml
+        manifest_key: ci
+        builds:
+            - name: app
+              workflow: .github/workflows/build-app.yaml
+              triggers: []
+        deploys:
+            - name: app
+              workflow: .github/workflows/deploy-app.yaml
+              triggers: []
+        rollback:
+            repository_dispatch:
+                types:
+                    - rollback-requested
+    state:
+        prod:
+            sha: bfd7808fb14443dd0f5848d3714a92b22b0746d1
+            version: v0.6.0-dryrun.2
+            committed_at: "2026-06-26T22:49:41Z"
+            committed_by: joshua-temple
+            deploys:
+                app:
+                    sha: bfd7808fb14443dd0f5848d3714a92b22b0746d1
+                    version: v0.6.0-dryrun.2
+                    deployed_at: "2026-06-26T22:49:41Z"
+                    deployed_by: joshua-temple
+            ref: rollback/prod
+            base_sha: 0a70288844cd66e82ad4f28513708aa910d90932
+            previous:
+                - sha: 0a70288844cd66e82ad4f28513708aa910d90932
+                  version: v0.1.0-rc.1
+                  committed_at: "2026-06-26T22:48:50Z"
+                  committed_by: joshua-temple
+                - sha: bfd7808fb14443dd0f5848d3714a92b22b0746d1
+                  version: v0.6.0-dryrun.2
+                  committed_at: "2026-06-26T18:23:34Z"
+                  committed_by: joshua-temple
