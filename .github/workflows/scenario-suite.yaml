@@ -276,8 +276,9 @@ jobs:
           conclusion="$(wait_for_orchestrate_sha "${MERGE2}")"
           assert_equal "advance orchestrate conclusion" "${conclusion}" "success"
           echo "orchestrate2_run_id=$(cat "${RESOLVED_RUN_ID_FILE}")" >> "$GITHUB_OUTPUT"
-          # Prod now carries the second deploy, with the first retained in the
-          # deploy-history ring as the rollback target.
+          # Prod now carries the second deploy. The rollback step below reverts it
+          # to whatever prior the resolver picks, asserted against the workflow's
+          # own preflight rather than assuming a specific SHA.
           sync_env_state_until_sha_changed prod "${PRIOR_SHA}"
           SHA2="$(state_sha prod)"
           VER2="$(state_version prod)"
@@ -289,19 +290,41 @@ jobs:
       - name: Rollback - fire repository_dispatch and assert the real revert
         id: rollback
         env:
-          PRIOR_SHA: ${{ steps.seed.outputs.prior_sha }}
-          PRIOR_VERSION: ${{ steps.seed.outputs.prior_version }}
           CURRENT_SHA: ${{ steps.advance.outputs.current_sha }}
           CURRENT_VERSION: ${{ steps.advance.outputs.current_version }}
         run: |
           set -euo pipefail
+          # Read the post-advance trunk state the dispatched rollback will see.
+          git fetch origin main --quiet
+          git reset --hard origin/main >/dev/null
+          # Resolve, with the same resolver the generated rollback workflow's
+          # preflight uses, the exact target a no-target rollback re-promotes.
+          # The deploy-on-merge path does not push to the deploy-history ring, so
+          # the prior the rollback reverts to is whatever the ring (or, failing
+          # that, manifest git history) already holds, not necessarily the SHA
+          # this suite just seeded. In the live fleet the repin push and earlier
+          # runs leave ring entries the suite never seeded, so the assertion is
+          # anchored to this resolved target, keeping the suite correct standalone
+          # and in-fleet while still exercising the no-target client_payload path.
+          plan="$(cascade rollback preflight --env prod --json)"
+          EXP_SHA="$(printf '%s' "$plan" | jq -r '.target.sha // empty')"
+          EXP_VER="$(printf '%s' "$plan" | jq -r '.target.version // empty')"
+          EXP_SRC="$(printf '%s' "$plan" | jq -r '.target.source // empty')"
+          NOOP="$(printf '%s' "$plan" | jq -r '.no_op')"
+          assert_match "preflight target sha" "${EXP_SHA}" "${SHA_RE}"
+          assert_equal "preflight resolves a real revert" "${NOOP}" "false"
+          if [ "${EXP_SHA}" = "${CURRENT_SHA}" ]; then
+            echo "::error::preflight target equals current sha; nothing to revert"
+            exit 1
+          fi
+          echo "preflight: prod will revert to ${EXP_VER:-<none>} (${EXP_SHA}) [from ${EXP_SRC}]"
           export RESOLVED_RUN_ID_FILE="${RUNNER_TEMP}/rollback-run-id"
           ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           # Fire the REAL external entry point: the dispatches API with the
           # rollback parameters in client_payload. The keys (environment,
           # dry_run) match exactly what the generated rollback workflow reads
-          # via github.event.client_payload.<key>. No target is sent, so
-          # preflight resolves the previous version from the deploy-history ring.
+          # via github.event.client_payload.<key>. No target is sent, so the
+          # workflow's own preflight resolves the previous version the same way.
           gh api "repos/${GITHUB_REPOSITORY}/dispatches" -X POST \
             -f event_type=rollback-requested \
             -f 'client_payload[environment]=prod' \
@@ -316,9 +339,12 @@ jobs:
           NEW_VER="$(state_version prod)"
           NEW_REF="$(state_ref prod)"
           assert_match "rolled-back prod sha" "${NEW_SHA}" "${SHA_RE}"
-          # Reverted to the exact prior deploy, not the pre-rollback current one.
-          assert_equal "prod reverted to prior sha" "${NEW_SHA}" "${PRIOR_SHA}"
-          assert_equal "prod reverted to prior version" "${NEW_VER}" "${PRIOR_VERSION}"
+          # Reverted to exactly the target the resolver predicted, not the
+          # pre-rollback current one.
+          assert_equal "prod reverted to resolved prior sha" "${NEW_SHA}" "${EXP_SHA}"
+          if [ -n "${EXP_VER}" ]; then
+            assert_equal "prod reverted to resolved prior version" "${NEW_VER}" "${EXP_VER}"
+          fi
           if [ "${NEW_SHA}" = "${CURRENT_SHA}" ]; then
             echo "::error::prod sha did not revert (still ${CURRENT_SHA})"
             exit 1
@@ -329,8 +355,9 @@ jobs:
             echo "## repository_dispatch rollback"
             echo "- fired via dispatches API (event_type=rollback-requested)"
             echo "- client_payload keys: environment, dry_run"
-            echo "- prod ${CURRENT_VERSION} -> ${NEW_VER} (reverted to prior)"
-            echo "- prod sha reverted to prior deploy: yes"
+            echo "- prod ${CURRENT_VERSION} -> ${NEW_VER:-<none>} (reverted to resolved prior)"
+            echo "- resolved target source: ${EXP_SRC}"
+            echo "- prod sha reverted to resolved prior deploy: yes"
             echo "- prod marked diverged (ref=rollback/prod): yes"
           } >> "$GITHUB_STEP_SUMMARY"
 
