@@ -6,7 +6,7 @@ ci:
             - src/**
         environments:
             - prod
-        cli_version: v0.5.0-rc.10
+        cli_version: v0.6.0-dryrun.2
         state_token: ${{ secrets.CASCADE_STATE_TOKEN }}
         manifest_file: .github/manifest.yaml
         manifest_key: ci
@@ -25,19 +25,19 @@ ci:
     state:
         prod:
             sha: 6363df90f335c07c7a61748a7c64c663351409fe
-            version: v0.1.0-rc.1
+            version: v0.6.0-dryrun.2
             committed_at: "2026-06-26T18:24:25Z"
             committed_by: joshua-temple
             deploys:
                 app:
                     sha: 6363df90f335c07c7a61748a7c64c663351409fe
-                    version: v0.1.0-rc.1
+                    version: v0.6.0-dryrun.2
                     deployed_at: "2026-06-26T18:24:25Z"
                     deployed_by: joshua-temple
             ref: rollback/prod
             base_sha: bfd7808fb14443dd0f5848d3714a92b22b0746d1
             previous:
                 - sha: bfd7808fb14443dd0f5848d3714a92b22b0746d1
-                  version: v0.1.0-rc.2
+                  version: v0.6.0-dryrun.2
                   committed_at: "2026-06-26T18:23:34Z"
                   committed_by: joshua-temple
