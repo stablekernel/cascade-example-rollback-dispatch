@@ -24,15 +24,15 @@ ci:
           - rollback-requested
   state:
     prod:
-      sha: 3f7b4882aaea890b8cfde592dce4f1bf5d046fe2
-      version: v0.1.0-rc.0
-      committed_at: "2026-06-27T06:31:46Z"
+      sha: 76750e8342a555b7dccbfa98d7c471f55e924e0f
+      version: v0.1.0-rc.1
+      committed_at: "2026-06-27T06:32:53Z"
       committed_by: joshua-temple
       deploys:
         app:
-          sha: 3f7b4882aaea890b8cfde592dce4f1bf5d046fe2
+          sha: 76750e8342a555b7dccbfa98d7c471f55e924e0f
           version: v0.5.1
-          deployed_at: "2026-06-27T06:31:46Z"
+          deployed_at: "2026-06-27T06:32:53Z"
           deployed_by: joshua-temple
       ref: rollback/prod
       base_sha: 7e79add784b8edf4af0edf16fae1d6d100d7f83e
