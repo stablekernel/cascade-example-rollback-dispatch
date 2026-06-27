@@ -6,8 +6,8 @@ ci:
             - src/**
         environments:
             - prod
-        cli_version: v0.6.0-dryrun.3
-        cli_version_sha: 5702d41b698167339851ef2a6233797ef1c4acb7
+        cli_version: v0.5.1
+        cli_version_sha: 3722c8ea2693b00fd2202ca56201c8c22f81d950
         state_token: ${{ secrets.CASCADE_STATE_TOKEN }}
         manifest_file: .github/manifest.yaml
         manifest_key: ci
@@ -39,7 +39,7 @@ ci:
             base_sha: b82e840949084b7e94d435729c0a5465459ec3de
             previous:
                 - sha: b82e840949084b7e94d435729c0a5465459ec3de
-                  version: v0.1.0-rc.1
+                  version: v0.5.1
                   committed_at: "2026-06-27T01:35:46Z"
                   committed_by: joshua-temple
                 - sha: 9503f3dbe43bc2bc55309af69c4e35c8b2f31214
