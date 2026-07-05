@@ -162,16 +162,20 @@ jobs:
             echo "::error::timed out waiting for orchestrate run for ${merge_sha}"
             return 1
           }
-          # Dispatch the generated Promote workflow (sequential staging -> prod)
-          # and wait for the run it created, keyed on a dispatch timestamp so a
-          # stale or concurrent promote is never mistaken for this one. The
-          # workflow-run acknowledgement is sent to stderr so only the resolved
-          # conclusion reaches stdout for the caller to capture. Writes the run
-          # id to RESOLVED_RUN_ID_FILE and prints the conclusion.
+          # Dispatch the generated Promote workflow in staging-to-prod cascade
+          # mode and wait for the run it created, keyed on a dispatch timestamp so
+          # a stale or concurrent promote is never mistaken for this one. The
+          # cascade is atomic: it publishes the release marker and deploys prod in
+          # a single dispatch, so prod actually advances. A plain default promote
+          # only advances one hop (staging to the release marker) and leaves prod
+          # untouched, which is not what this seed needs. The workflow-run
+          # acknowledgement is sent to stderr so only the resolved conclusion
+          # reaches stdout for the caller to capture. Writes the run id to
+          # RESOLVED_RUN_ID_FILE and prints the conclusion.
           promote_staging_to_prod() {
             local since attempts=15 i=0 run_id="" status conclusion
             since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            gh workflow run promote.yaml -f mode=default --ref main >&2
+            gh workflow run promote.yaml -f mode=staging-to-prod --ref main >&2
             while [ "${i}" -lt "${attempts}" ]; do
               if [ -z "${run_id}" ]; then
                 run_id="$(gh run list --workflow promote.yaml --branch main \
