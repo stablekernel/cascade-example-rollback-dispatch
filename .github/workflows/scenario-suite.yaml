@@ -9,10 +9,14 @@ name: scenario-suite
 # the same jobs resolve whether the rollback came from the manual
 # (workflow_dispatch) or the external (repository_dispatch) path.
 #
-# This suite seeds two successive prod deploys, then fires a REAL
-# repository_dispatch rollback via the dispatches API and asserts prod actually
-# reverted to its prior SHA and version and was marked diverged. It is the only
-# live proof of the client_payload coalesce path.
+# The ring is [staging, prod]: staging is the trunk-tracking first environment
+# and prod is promoted into. Only a promoted-into environment carries rollback
+# history, so this suite seeds staging on a merge, promotes it to prod, advances
+# staging and promotes again (leaving prod's earlier version in its
+# deploy-history ring), then fires a REAL repository_dispatch rollback via the
+# dispatches API and asserts prod actually reverted to its prior SHA and version
+# and was marked diverged. It is the only live proof of the client_payload
+# coalesce path driving a full revert.
 
 on:
   workflow_dispatch: {}
@@ -64,6 +68,8 @@ jobs:
     outputs:
       orchestrate1_run_id: ${{ steps.seed.outputs.orchestrate1_run_id }}
       orchestrate2_run_id: ${{ steps.advance.outputs.orchestrate2_run_id }}
+      promote1_run_id: ${{ steps.seed.outputs.promote1_run_id }}
+      promote2_run_id: ${{ steps.advance.outputs.promote2_run_id }}
       rollback_run_id: ${{ steps.rollback.outputs.rollback_run_id }}
     steps:
       - name: Install gh transient-retry wrapper and helpers
@@ -154,6 +160,39 @@ jobs:
               sleep 60
             done
             echo "::error::timed out waiting for orchestrate run for ${merge_sha}"
+            return 1
+          }
+          # Dispatch the generated Promote workflow (sequential staging -> prod)
+          # and wait for the run it created, keyed on a dispatch timestamp so a
+          # stale or concurrent promote is never mistaken for this one. The
+          # workflow-run acknowledgement is sent to stderr so only the resolved
+          # conclusion reaches stdout for the caller to capture. Writes the run
+          # id to RESOLVED_RUN_ID_FILE and prints the conclusion.
+          promote_staging_to_prod() {
+            local since attempts=15 i=0 run_id="" status conclusion
+            since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            gh workflow run promote.yaml -f mode=default --ref main >&2
+            while [ "${i}" -lt "${attempts}" ]; do
+              if [ -z "${run_id}" ]; then
+                run_id="$(gh run list --workflow promote.yaml --branch main \
+                  --created ">=${since}" \
+                  --json databaseId --jq '.[0].databaseId // empty')"
+                if [ -n "${run_id}" ] && [ -n "${RESOLVED_RUN_ID_FILE:-}" ]; then
+                  echo "${run_id}" > "${RESOLVED_RUN_ID_FILE}"
+                fi
+              fi
+              if [ -n "${run_id}" ]; then
+                status="$(gh run view "${run_id}" --json status --jq '.status // "none"')"
+                if [ "${status}" = "completed" ]; then
+                  conclusion="$(gh run view "${run_id}" --json conclusion --jq '.conclusion // "none"')"
+                  echo "${conclusion}"
+                  return 0
+                fi
+              fi
+              i=$((i + 1))
+              sleep 60
+            done
+            echo "::error::timed out waiting for promote run since ${since}"
             return 1
           }
           # Bounded wait for the rollback run fired by repository_dispatch. The
@@ -247,45 +286,66 @@ jobs:
           git fetch --tags --quiet || true
           for t in $(git tag -l 'v*' 'rel-*'); do git push origin --delete "$t" 2>/dev/null || true; done
 
-      - name: Seed - first prod deploy
+      - name: Seed - deploy staging, then promote to prod
         id: seed
         run: |
           set -euo pipefail
-          export RESOLVED_RUN_ID_FILE="${RUNNER_TEMP}/seed-run-id"
+          # Capture prod's baseline sha so the post-promote wait keys on a real
+          # change rather than assuming a starting value.
+          PROD_BASE="$(state_sha prod)"
+          # A merge to trunk deploys the first environment (staging); prod is
+          # reached only by promotion.
+          export RESOLVED_RUN_ID_FILE="${RUNNER_TEMP}/seed-orchestrate-run-id"
           MERGE1="$(merge_source_change a | tail -n1)"
           conclusion="$(wait_for_orchestrate_sha "${MERGE1}")"
           assert_equal "seed orchestrate conclusion" "${conclusion}" "success"
           echo "orchestrate1_run_id=$(cat "${RESOLVED_RUN_ID_FILE}")" >> "$GITHUB_OUTPUT"
-          sync_env_state_until_sha_changed prod "none"
+          sync_env_state_until_sha_changed staging "none"
+          assert_equal "seed staging sha == merge1" "$(state_sha staging)" "${MERGE1}"
+          # Promote staging -> prod so prod carries its first deployed version.
+          export RESOLVED_RUN_ID_FILE="${RUNNER_TEMP}/seed-promote-run-id"
+          pconcl="$(promote_staging_to_prod)"
+          assert_equal "seed promote conclusion" "${pconcl}" "success"
+          echo "promote1_run_id=$(cat "${RESOLVED_RUN_ID_FILE}")" >> "$GITHUB_OUTPUT"
+          sync_env_state_until_sha_changed prod "${PROD_BASE}"
           SHA1="$(state_sha prod)"
           VER1="$(state_version prod)"
           assert_match "seed prod sha" "${SHA1}" "${SHA_RE}"
           assert_equal "seed prod sha == merge1" "${SHA1}" "${MERGE1}"
           echo "prior_sha=${SHA1}" >> "$GITHUB_OUTPUT"
           echo "prior_version=${VER1}" >> "$GITHUB_OUTPUT"
-          echo "seeded prod at ${VER1} (${SHA1})"
+          echo "seeded prod at ${VER1} (${SHA1}) via promotion"
 
-      - name: Advance - second prod deploy
+      - name: Advance - deploy staging, then promote a second version to prod
         id: advance
         env:
           PRIOR_SHA: ${{ steps.seed.outputs.prior_sha }}
         run: |
           set -euo pipefail
-          export RESOLVED_RUN_ID_FILE="${RUNNER_TEMP}/advance-run-id"
+          export RESOLVED_RUN_ID_FILE="${RUNNER_TEMP}/advance-orchestrate-run-id"
           MERGE2="$(merge_source_change b | tail -n1)"
           conclusion="$(wait_for_orchestrate_sha "${MERGE2}")"
           assert_equal "advance orchestrate conclusion" "${conclusion}" "success"
           echo "orchestrate2_run_id=$(cat "${RESOLVED_RUN_ID_FILE}")" >> "$GITHUB_OUTPUT"
-          # Prod now carries the second deploy. The rollback step below reverts it
-          # to whatever prior the resolver picks, asserted against the workflow's
-          # own preflight rather than assuming a specific SHA.
+          sync_env_state_until_sha_changed staging "${PRIOR_SHA}"
+          assert_equal "advance staging sha == merge2" "$(state_sha staging)" "${MERGE2}"
+          # Promote the new staging version to prod. This displaces prod's first
+          # version into its deploy-history ring, giving the rollback a real prior
+          # to resolve.
+          export RESOLVED_RUN_ID_FILE="${RUNNER_TEMP}/advance-promote-run-id"
+          pconcl="$(promote_staging_to_prod)"
+          assert_equal "advance promote conclusion" "${pconcl}" "success"
+          echo "promote2_run_id=$(cat "${RESOLVED_RUN_ID_FILE}")" >> "$GITHUB_OUTPUT"
+          # Prod now carries the second promoted version. The rollback step below
+          # reverts it to whatever prior the resolver picks, asserted against the
+          # workflow's own preflight rather than assuming a specific SHA.
           sync_env_state_until_sha_changed prod "${PRIOR_SHA}"
           SHA2="$(state_sha prod)"
           VER2="$(state_version prod)"
           assert_equal "advance prod sha == merge2" "${SHA2}" "${MERGE2}"
           echo "current_sha=${SHA2}" >> "$GITHUB_OUTPUT"
           echo "current_version=${VER2}" >> "$GITHUB_OUTPUT"
-          echo "advanced prod to ${VER2} (${SHA2})"
+          echo "advanced prod to ${VER2} (${SHA2}) via promotion"
 
       - name: Rollback - fire repository_dispatch and assert the real revert
         id: rollback
@@ -299,13 +359,11 @@ jobs:
           git reset --hard origin/main >/dev/null
           # Resolve, with the same resolver the generated rollback workflow's
           # preflight uses, the exact target a no-target rollback re-promotes.
-          # The deploy-on-merge path does not push to the deploy-history ring, so
-          # the prior the rollback reverts to is whatever the ring (or, failing
-          # that, manifest git history) already holds, not necessarily the SHA
-          # this suite just seeded. In the live fleet the repin push and earlier
-          # runs leave ring entries the suite never seeded, so the assertion is
-          # anchored to this resolved target, keeping the suite correct standalone
-          # and in-fleet while still exercising the no-target client_payload path.
+          # The two promotions above left prod's earlier version in its
+          # deploy-history ring, so the prior the rollback reverts to is that
+          # ring entry. The assertion is anchored to this resolved target rather
+          # than a hard-coded SHA, keeping the suite correct standalone and
+          # in-fleet while still exercising the no-target client_payload path.
           plan="$(cascade rollback preflight --env prod --json)"
           EXP_SHA="$(printf '%s' "$plan" | jq -r '.target.sha // empty')"
           EXP_VER="$(printf '%s' "$plan" | jq -r '.target.version // empty')"
@@ -369,12 +427,28 @@ jobs:
           reason: seed-orchestrate-on-merge
           upload: 'true'
 
+      - name: Register seed promote run
+        uses: stablekernel/cascade/.github/actions/register-run@main
+        with:
+          run-id: ${{ steps.seed.outputs.promote1_run_id }}
+          expected-conclusion: success
+          reason: seed-promote-staging-to-prod
+          upload: 'true'
+
       - name: Register advance orchestrate run
         uses: stablekernel/cascade/.github/actions/register-run@main
         with:
           run-id: ${{ steps.advance.outputs.orchestrate2_run_id }}
           expected-conclusion: success
           reason: advance-orchestrate-on-merge
+          upload: 'true'
+
+      - name: Register advance promote run
+        uses: stablekernel/cascade/.github/actions/register-run@main
+        with:
+          run-id: ${{ steps.advance.outputs.promote2_run_id }}
+          expected-conclusion: success
+          reason: advance-promote-staging-to-prod
           upload: 'true'
 
       - name: Register repository_dispatch rollback run

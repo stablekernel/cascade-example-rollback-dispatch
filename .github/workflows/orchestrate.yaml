@@ -14,8 +14,9 @@ on:
         description: 'Target environment'
         type: choice
         options:
+          - staging
           - prod
-        default: 'prod'
+        default: 'staging'
       dry_run:
         description: 'Dry run mode'
         type: boolean
@@ -55,7 +56,7 @@ jobs:
       - name: Run Setup
         id: setup
         env:
-          ENVIRONMENT: ${{ github.event.inputs.environment || 'prod' }}
+          ENVIRONMENT: ${{ github.event.inputs.environment || 'staging' }}
         run: |
           cascade orchestrate setup \
             --environment "$ENVIRONMENT" \
@@ -69,7 +70,7 @@ jobs:
       needs.setup.outputs.run_build_app == 'true'
     uses: ./.github/workflows/build-app.yaml
     with:
-      environment: ${{ github.event.inputs.environment || 'prod' }}
+      environment: ${{ github.event.inputs.environment || 'staging' }}
       sha: ${{ needs.setup.outputs.head_sha }}
 
   deploy-app:
@@ -79,7 +80,7 @@ jobs:
       needs.setup.outputs.run_deploy_app == 'true'
     uses: ./.github/workflows/deploy-app.yaml
     with:
-      environment: ${{ github.event.inputs.environment || 'prod' }}
+      environment: ${{ github.event.inputs.environment || 'staging' }}
       sha: ${{ needs.setup.outputs.head_sha }}
 
   finalize:
@@ -145,7 +146,7 @@ jobs:
           action: update
           tag: ${{ needs.setup.outputs.version }}
           create_tag: 'true'
-          environment: ${{ github.event.inputs.environment || 'prod' }}
+          environment: ${{ github.event.inputs.environment || 'staging' }}
           sha: ${{ needs.setup.outputs.head_sha }}
           changelog: ${{ steps.changelog.outputs.changelog }}
           previous_tag: ${{ needs.setup.outputs.previous_tag }}
@@ -155,7 +156,7 @@ jobs:
           GH_TOKEN: ${{ secrets.CASCADE_STATE_TOKEN }}
           HEAD_SHA: ${{ needs.setup.outputs.head_sha }}
           VERSION: ${{ needs.setup.outputs.version }}
-          ENVIRONMENT: ${{ github.event.inputs.environment || 'prod' }}
+          ENVIRONMENT: ${{ github.event.inputs.environment || 'staging' }}
           APP_RESULT: ${{ needs.deploy-app.result }}
         run: |
           MANIFEST_FILE=".github/manifest.yaml"
