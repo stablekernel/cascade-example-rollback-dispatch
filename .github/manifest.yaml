@@ -1,49 +1,59 @@
 ci:
-  config:
-    schema_version: 1
-    trunk_branch: main
-    triggers:
-      - src/**
-    environments:
-      - staging
-      - prod
-    cli_version: v0.8.1-dryrun.28
-    cli_version_sha: daa9b93ec49025c22735145d6d78ff4afd14933d
-    state_token: ${{ secrets.CASCADE_STATE_TOKEN }}
-    manifest_file: .github/manifest.yaml
-    manifest_key: ci
-    builds:
-      - name: app
-        workflow: .github/workflows/build-app.yaml
-        triggers: []
-    deploys:
-      - name: app
-        workflow: .github/workflows/deploy-app.yaml
-        triggers: []
-    rollback:
-      repository_dispatch:
-        types:
-          - rollback-requested
-  state:
-    staging:
-      sha: f7a02c73823895b4e3139f23ea0f283e1a9f9c31
-      version: v0.2.0-rc.0
-      committed_at: "2026-07-05T17:08:35Z"
-      committed_by: joshua-temple
-      deploys:
-        app:
-          sha: f7a02c73823895b4e3139f23ea0f283e1a9f9c31
-          version: v0.8.1-dryrun.28
-          deployed_at: "2026-07-05T17:08:35Z"
-          deployed_by: joshua-temple
-    prod:
-      sha: 6e14e84341405d81c3a53f617e28822722e96a74
-      version: v0.1.0
-      committed_at: "2026-07-05T06:00:00Z"
-      committed_by: joshua-temple
-      deploys:
-        app:
-          sha: 6e14e84341405d81c3a53f617e28822722e96a74
-          version: v0.1.0
-          deployed_at: "2026-07-05T06:00:00Z"
-          deployed_by: joshua-temple
+    config:
+        schema_version: 1
+        trunk_branch: main
+        triggers:
+            - src/**
+        environments:
+            - staging
+            - prod
+        cli_version: v0.8.1-dryrun.28
+        cli_version_sha: daa9b93ec49025c22735145d6d78ff4afd14933d
+        state_token: ${{ secrets.CASCADE_STATE_TOKEN }}
+        manifest_file: .github/manifest.yaml
+        manifest_key: ci
+        builds:
+            - name: app
+              workflow: .github/workflows/build-app.yaml
+              triggers: []
+        deploys:
+            - name: app
+              workflow: .github/workflows/deploy-app.yaml
+              triggers: []
+        rollback:
+            repository_dispatch:
+                types:
+                    - rollback-requested
+    state:
+        prod:
+            sha: 6e14e84341405d81c3a53f617e28822722e96a74
+            version: v0.1.0
+            committed_at: "2026-07-05T06:00:00Z"
+            committed_by: joshua-temple
+            deploys:
+                app:
+                    sha: 6e14e84341405d81c3a53f617e28822722e96a74
+                    version: v0.1.0
+                    deployed_at: "2026-07-05T06:00:00Z"
+                    deployed_by: joshua-temple
+        release:
+            sha: f7a02c73823895b4e3139f23ea0f283e1a9f9c31
+            version: v0.2.0
+            committed_at: "2026-07-05T17:09:30Z"
+            committed_by: joshua-temple
+        staging:
+            sha: f7a02c73823895b4e3139f23ea0f283e1a9f9c31
+            version: v0.2.0-rc.0
+            committed_at: "2026-07-05T17:08:35Z"
+            committed_by: joshua-temple
+            deploys:
+                app:
+                    sha: f7a02c73823895b4e3139f23ea0f283e1a9f9c31
+                    version: v0.8.1-dryrun.28
+                    deployed_at: "2026-07-05T17:08:35Z"
+                    deployed_by: joshua-temple
+    latest_release:
+        version: v0.2.0
+        sha: f7a02c73823895b4e3139f23ea0f283e1a9f9c31
+        released_on: "2026-07-05T17:09:30Z"
+        released_by: joshua-temple
