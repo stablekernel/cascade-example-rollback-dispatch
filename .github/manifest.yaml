@@ -26,17 +26,23 @@ ci:
                     - rollback-requested
     state:
         prod:
-            sha: 966d85bcb29168193bb8191c460c5cbaa2c51fdd
-            version: v0.12.0
-            committed_at: "2026-07-06T21:40:41Z"
+            sha: 856b50d3c2db04555101f25c3b0f4435c7dfcf11
+            version: v0.11.0
+            committed_at: "2026-07-06T21:41:33Z"
             committed_by: joshua-temple
             deploys:
                 app:
-                    sha: 966d85bcb29168193bb8191c460c5cbaa2c51fdd
-                    version: v0.12.0
-                    deployed_at: "2026-07-06T21:40:41Z"
+                    sha: 856b50d3c2db04555101f25c3b0f4435c7dfcf11
+                    version: v0.11.0
+                    deployed_at: "2026-07-06T21:41:33Z"
                     deployed_by: joshua-temple
+            ref: rollback/prod
+            base_sha: 966d85bcb29168193bb8191c460c5cbaa2c51fdd
             previous:
+                - sha: 966d85bcb29168193bb8191c460c5cbaa2c51fdd
+                  version: v0.12.0
+                  committed_at: "2026-07-06T21:40:41Z"
+                  committed_by: joshua-temple
                 - sha: 856b50d3c2db04555101f25c3b0f4435c7dfcf11
                   version: v0.11.0
                   committed_at: "2026-07-06T21:38:31Z"
@@ -72,10 +78,6 @@ ci:
                 - sha: 084560896b759cd63310994c8833aba6803f3a33
                   version: v0.9.0
                   committed_at: "2026-07-06T10:54:00Z"
-                  committed_by: joshua-temple
-                - sha: caad91444a7db24de2f7af0b0fe50b7e67db53da
-                  version: v0.8.0
-                  committed_at: "2026-07-06T10:51:48Z"
                   committed_by: joshua-temple
         release:
             sha: 966d85bcb29168193bb8191c460c5cbaa2c51fdd
