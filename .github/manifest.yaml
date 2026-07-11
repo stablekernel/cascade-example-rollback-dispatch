@@ -127,7 +127,7 @@ ci:
                   committed_by: joshua-temple
         staging:
             sha: ff49e2d8a20521ca8979022332afd389dc5a8cdb
-            version: v0.30.0-rc.0
+            version: v0.14.1-dryrun.58
             committed_at: "2026-07-11T09:11:15Z"
             committed_by: joshua-temple
             deploys:
